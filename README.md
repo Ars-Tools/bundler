@@ -13,7 +13,7 @@ It has no dependency on Core Audio or HSP and supports bundles such as `.bundle`
 Add Bundler as a direct dependency of your package:
 
 ```swift
-Package.Dependency.package(url: "https://github.com/Ars-Tools/bundler.git", branch: "main"),
+Package.Dependency.package(url: "https://github.com/Ars-Tools/bundler.git", branch: "release"),
 ```
 
 Declare an explicitly static library product in the consuming package:
@@ -22,7 +22,8 @@ Declare an explicitly static library product in the consuming package:
 Product.library(name: "MyPlugin", type: Product.Library.LibraryType.static, targets: ["MyPlugin"]),
 ```
 
-Place an `Info.plist` at the package root with `CFBundleExecutable` and `CFBundleIdentifier` entries.
+Place an `Info.plist` in the selected product's target directory (the target's `path` in `Package.swift`)
+with `CFBundleExecutable` and `CFBundleIdentifier` entries. Exclude this file from the target's sources using `exclude: ["Info.plist"]`.
 Implement the entry points and supply any additional metadata required by the host application.
 An optional `Resources/` directory at the package root is copied into the bundle.
 
@@ -49,9 +50,12 @@ It prints the absolute path to the completed bundle.
 | `--product` | Consuming package name | Static library product to build. |
 | `--extension` | `bundle` | Output bundle extension. |
 | `--configuration` | `release` | Build configuration: `debug` or `release`. |
-| `--info-plist` | `Info.plist` | Property list path relative to the package root. |
+| `--info-plist` | Automatic lookup | Override the property list path, relative to the package root. |
 | `--resources` | `Resources` | Resources directory relative to the package root. The default directory may be absent; an explicitly supplied path must exist. |
 | `--verify` | None | Executable product to build and run after bundle creation. May be repeated. |
+
+Without `--info-plist`, Bundler searches the selected product's target directories for `Info.plist`,
+then falls back to the package root. If multiple targets contain a property list, specify `--info-plist` explicitly.
 
 The bundle name and its internal binary name come from `CFBundleExecutable`.
 The code-signing identifier comes from `CFBundleIdentifier`.

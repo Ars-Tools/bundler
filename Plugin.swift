@@ -22,7 +22,7 @@ struct Plugin: CommandPlugin {
         }
         let product: String = products.first ?? context.package.displayName
         let suffix: String = extensions.first ?? "bundle"
-        let plist: URL = context.package.directoryURL.appendingPathComponent(plists.first ?? "Info.plist")
+        let plist: URL = try infoPlist(in: context.package, product: product, path: plists.first)
         let metadata: Any = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), options: [], format: nil)
         guard let properties: Dictionary<String, Any> = metadata as? Dictionary<String, Any>,
             let name: String = properties["CFBundleExecutable"] as? String,
@@ -78,6 +78,29 @@ struct Plugin: CommandPlugin {
             guard verification.succeeded else { throw Error(message: verification.logText) }
             try run(artifact(verifier, in: verification), arguments: [bundle.appendingPathComponent("Contents/MacOS").appendingPathComponent(name).path])
         }
+    }
+
+    @inlinable
+    @_transparent
+    func infoPlist(in package: Package, product name: String, path: String?) throws -> URL {
+        if let path: String = path {
+            return package.directoryURL.appendingPathComponent(path)
+        }
+        guard let product: any Product = package.products.first(where: { $0.name == name }) else {
+            throw Error(message: "No product named \(name)")
+        }
+        let candidates: Array<URL> = product.targets.map {
+            $0.directoryURL.appendingPathComponent("Info.plist")
+        }.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard candidates.count <= 1 else {
+            throw Error(message: "Multiple target Info.plist files for \(name); select one with --info-plist")
+        }
+        if let candidate: URL = candidates.first { return candidate }
+        let fallback: URL = package.directoryURL.appendingPathComponent("Info.plist")
+        guard FileManager.default.fileExists(atPath: fallback.path) else {
+            throw Error(message: "No Info.plist in targets of \(name) or the package root; specify --info-plist")
+        }
+        return fallback
     }
 
     @inlinable
