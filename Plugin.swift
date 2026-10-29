@@ -2,7 +2,7 @@ import Foundation
 import PackagePlugin
 
 @main
-struct BuildBundle: CommandPlugin {
+struct Plugin: CommandPlugin {
     func performCommand(context: PluginContext, arguments: Array<String>) throws {
         var options: ArgumentExtractor = ArgumentExtractor(arguments)
         let configurations: Array<String> = options.extractOption(named: "configuration")
@@ -18,7 +18,7 @@ struct BuildBundle: CommandPlugin {
             configuration != PackageManager.BuildConfiguration.inherit,
             options.remainingArguments.isEmpty
         else {
-            throw BundleBuildError(message: "Usage: swift package build-bundle [--product name] [--extension bundle] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--verify executable-product]...")
+            throw Error(message: "Usage: swift package build-bundle [--product name] [--extension bundle] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--verify executable-product]...")
         }
         let product: String = products.first ?? context.package.displayName
         let suffix: String = extensions.first ?? "bundle"
@@ -30,14 +30,14 @@ struct BuildBundle: CommandPlugin {
             !identifier.isEmpty, !name.isEmpty, name != ".", name != "..", !name.contains("/"),
             !suffix.isEmpty, suffix != ".", suffix != "..", !suffix.contains("/")
         else {
-            throw BundleBuildError(message: "Info.plist must contain CFBundleExecutable and CFBundleIdentifier; executable and extension must be path components")
+            throw Error(message: "Info.plist must contain CFBundleExecutable and CFBundleIdentifier; executable and extension must be path components")
         }
 
         let parameters: PackageManager.BuildParameters = PackageManager.BuildParameters(
             configuration: configuration, echoLogs: true)
         let subset: PackageManager.BuildSubset = PackageManager.BuildSubset.product(product)
         let build: PackageManager.BuildResult = try packageManager.build(subset, parameters: parameters)
-        guard build.succeeded else { throw BundleBuildError(message: build.logText) }
+        guard build.succeeded else { throw Error(message: build.logText) }
         let archive: URL = try artifact("lib\(product).a", in: build)
 
         let files: FileManager = FileManager.default
@@ -60,7 +60,7 @@ struct BuildBundle: CommandPlugin {
         if files.fileExists(atPath: resources.path) {
             try files.copyItem(at: resources, to: staging.appendingPathComponent("Contents/Resources"))
         } else if !resourcePaths.isEmpty {
-            throw BundleBuildError(message: "Resources directory does not exist: \(resources.path)")
+            throw Error(message: "Resources directory does not exist: \(resources.path)")
         }
 
         let codesign: URL = try context.tool(named: "codesign").url
@@ -75,7 +75,7 @@ struct BuildBundle: CommandPlugin {
         for verifier: String in verifiers {
             let verification: PackageManager.BuildResult = try packageManager.build(
                 PackageManager.BuildSubset.product(verifier), parameters: parameters)
-            guard verification.succeeded else { throw BundleBuildError(message: verification.logText) }
+            guard verification.succeeded else { throw Error(message: verification.logText) }
             try run(artifact(verifier, in: verification), arguments: [bundle.appendingPathComponent("Contents/MacOS").appendingPathComponent(name).path])
         }
     }
@@ -86,7 +86,7 @@ struct BuildBundle: CommandPlugin {
         guard let artifact: PackageManager.BuildResult.BuiltArtifact = build.builtArtifacts.first(where: {
             $0.url.lastPathComponent == name
         }) else {
-            throw BundleBuildError(message: "Build did not return \(name)")
+            throw Error(message: "Build did not return \(name)")
         }
         return artifact.url
     }
@@ -99,13 +99,13 @@ struct BuildBundle: CommandPlugin {
         guard process.terminationReason == Process.TerminationReason.exit,
             process.terminationStatus == 0
         else {
-            throw BundleBuildError(message: "\(executable.lastPathComponent) exited with status \(process.terminationStatus)")
+            throw Error(message: "\(executable.lastPathComponent) exited with status \(process.terminationStatus)")
         }
     }
 }
 
 @usableFromInline
-struct BundleBuildError: Error, CustomStringConvertible {
+struct Error: Swift.Error, CustomStringConvertible {
     @usableFromInline
     let message: String
 
