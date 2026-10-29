@@ -2,12 +2,18 @@
 import PackageDescription
 
 let package: Package = Package(
-    name: "BundleBuilder",
+    name: "Bundler",
     products: [
-        Product.plugin(name: "BuildBundle", targets: ["BuildBundle"]),
+        .plugin(
+            name: "Builder",
+            targets: ["Builder"]
+        ),
     ],
     targets: [
-        Target.plugin(name: "BuildBundle", capability: Target.PluginCapability.command(
-            intent: PluginCommandIntent.custom(verb: "build-bundle", description: "Build and sign a macOS loadable bundle"))),
+        .plugin(
+            name: "Builder",
+            capability: Target.PluginCapability.command(intent: PluginCommandIntent.custom(verb: "build-bundle", description: "Build and sign a macOS loadable bundle")),
+            path: "."
+        ),
     ]
 )
