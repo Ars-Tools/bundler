@@ -39,7 +39,7 @@ For a Core Audio HAL driver, select the `driver` extension:
 swift package build-bundle --product MyPlugin --extension driver
 ```
 
-The plugin builds the selected static library, links its archive into a Mach-O loadable bundle (`MH_BUNDLE`),
+The plugin builds the selected static library and links it into a Mach-O loadable bundle (`MH_BUNDLE`),
 copies the property list and resources, then applies and verifies an ad-hoc code signature.
 It prints the absolute path to the completed bundle.
 
@@ -47,7 +47,7 @@ In Xcode, choose Builder from the package's context menu and select one target.
 Xcode passes that selection as `--target`. Builder selects the static library
 product containing that target, preferring a product with the same name. If the
 selection is ambiguous, provide `--product` explicitly. For a HAL driver, enter
-`--extension driver` in Arguments; `--product` is unnecessary for a unique match.
+`--extension=driver` as one Arguments row; `--product` is unnecessary for a unique match.
 
 ## Options
 
@@ -93,6 +93,27 @@ The generated bundle is stored in the plugin's SwiftPM work directory. A typical
 ```
 
 `MyPlugin` here is the value of `CFBundleExecutable`.
+
+In Xcode, output is under its plugin work directory, typically:
+
+```text
+~/Library/Developer/Xcode/DerivedData/<workspace>/Build/Intermediates.noindex/
+  CommandPluginIntermediates/Builder.output/debug/MyPlugin.driver
+```
+
+Xcode may use its active build configuration even when a different configuration
+is requested through the plugin API. When the returned product directory is
+`Debug` or `Release`, Builder uses that configuration name for its output folder.
+The final `Bundle:` log line is the authoritative output path.
+
+SwiftPM normally returns a `lib<Product>.a` archive. Xcode can instead report an
+executable placeholder while emitting merged `<Module>.o` files. In that case,
+Builder links the selected product's source modules and transitive static source
+dependencies from the reported products directory. It does not include unrelated
+objects from that directory. Binary targets and explicit dynamic-product
+dependencies are not supported by this Xcode fallback; missing objects fail with
+a diagnostic. Module link libraries and frameworks are forwarded to the linker.
+The macOS SDK is resolved using `xcrun` and passed explicitly to `swiftc`.
 The command does not request permission to modify package sources.
 It does not load or install the resulting bundle automatically; optional verifiers run only when requested.
 

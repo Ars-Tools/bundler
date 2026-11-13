@@ -52,10 +52,15 @@ struct Plugin: CommandPlugin {
         let subset: PackageManager.BuildSubset = PackageManager.BuildSubset.product(product)
         let build: PackageManager.BuildResult = try packageManager.build(subset, parameters: parameters)
         guard build.succeeded else { throw Error(message: build.logText) }
-        let archive: URL = try artifact("lib\(product).a", in: build)
+        let inputs: Array<String> = try linkInputs(product, in: context.package, build: build)
 
         let files: FileManager = FileManager.default
-        let directory: URL = context.pluginWorkDirectoryURL.appendingPathComponent(configuration.rawValue)
+        // Xcode may use its active configuration rather than the requested one.
+        let builtConfiguration: String = build.builtArtifacts.first?.url
+            .deletingLastPathComponent().lastPathComponent.lowercased() ?? ""
+        let outputConfiguration: String = ["debug", "release"].contains(builtConfiguration)
+            ? builtConfiguration : configuration.rawValue
+        let directory: URL = context.pluginWorkDirectoryURL.appendingPathComponent(outputConfiguration)
         let bundle: URL = directory.appendingPathComponent("\(name).\(suffix)")
         let staging: URL = directory.appendingPathComponent(".\(name)-\(UUID().uuidString).\(suffix)")
         let macOS: URL = staging.appendingPathComponent("Contents/MacOS")
@@ -63,12 +68,22 @@ struct Plugin: CommandPlugin {
         try files.createDirectory(at: macOS, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: staging) }
 
-        // Link the package archive as MH_BUNDLE, preserving the exported C factory.
+        // Link the package code as MH_BUNDLE, preserving the exported C factory.
         let swiftc: URL = try context.tool(named: "swiftc").url
+        let xcrun: URL = try context.tool(named: "xcrun").url
+        let sdkOutput: Pipe = Pipe()
+        let sdkQuery: Process = Process()
+        sdkQuery.executableURL = xcrun
+        sdkQuery.arguments = ["--sdk", "macosx", "--show-sdk-path"]
+        sdkQuery.standardOutput = sdkOutput
+        try sdkQuery.run()
+        let sdk: String = String(decoding: sdkOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        sdkQuery.waitUntilExit()
+        guard sdkQuery.terminationStatus == 0, !sdk.isEmpty else { throw Error(message: "Cannot locate macOS SDK") }
         try run(swiftc, arguments: [
-            "-emit-executable", "-Xlinker", "-bundle", "-Xlinker", "-all_load",
-            archive.path, "-o", executable.path,
-        ])
+            "-sdk", sdk, "-emit-executable", "-Xlinker", "-bundle", "-Xlinker", "-all_load",
+        ] + inputs + ["-o", executable.path])
         try files.copyItem(at: plist, to: staging.appendingPathComponent("Contents/Info.plist"))
         let resources: URL = context.package.directoryURL.appendingPathComponent(resourcePaths.first ?? "Resources")
         if files.fileExists(atPath: resources.path) {
@@ -92,6 +107,48 @@ struct Plugin: CommandPlugin {
             guard verification.succeeded else { throw Error(message: verification.logText) }
             try run(artifact(verifier, in: verification), arguments: [bundle.appendingPathComponent("Contents/MacOS").appendingPathComponent(name).path])
         }
+    }
+
+    func linkInputs(_ name: String, in package: Package, build: PackageManager.BuildResult) throws -> Array<String> {
+        let files: FileManager = .default
+        if let archive = build.builtArtifacts.first(where: {
+            $0.url.lastPathComponent == "lib\(name).a" && files.fileExists(atPath: $0.url.path)
+        }) { return [archive.url.path] }
+
+        // Xcode reports an executable placeholder for package libraries, but
+        // emits one merged .o per module. Link only this product's dependencies.
+        guard let product = package.products.first(where: { $0.name == name }),
+              !build.builtArtifacts.isEmpty else { throw Error(message: "Build returned no artifacts for \(name)") }
+        let directories: Array<URL> = build.builtArtifacts.map { $0.url.deletingLastPathComponent() }
+        var pending: Array<any Target> = product.targets
+        var visited: Set<String> = []
+        var inputs: Array<String> = []
+        while let target = pending.popLast() {
+            guard visited.insert(target.id).inserted else { continue }
+            guard let module = target as? any SourceModuleTarget else {
+                throw Error(message: "Xcode object linking does not support target \(target.name)")
+            }
+            let candidates: Array<URL> = directories.map { $0.appendingPathComponent("\(module.moduleName).o") }
+            guard let object = candidates.first(where: { files.fileExists(atPath: $0.path) }) else {
+                throw Error(message: "Missing Xcode object for \(target.name): \(candidates.map(\.path).joined(separator: "; "))")
+            }
+            inputs.append(object.path)
+            for library in module.linkedLibraries { inputs.append("-l" + library) }
+            for framework in module.linkedFrameworks { inputs += ["-framework", framework] }
+            for dependency in target.dependencies {
+                switch dependency {
+                case .target(let target): pending.append(target)
+                case .product(let product):
+                    guard let library = product as? LibraryProduct, library.kind != .dynamic else {
+                        throw Error(message: "Xcode object linking requires static dependencies: \(product.name)")
+                    }
+                    pending += product.targets
+                @unknown default:
+                    throw Error(message: "Unsupported target dependency for \(target.name)")
+                }
+            }
+        }
+        return inputs
     }
 
     @inlinable
@@ -123,7 +180,8 @@ struct Plugin: CommandPlugin {
         guard let artifact: PackageManager.BuildResult.BuiltArtifact = build.builtArtifacts.first(where: {
             $0.url.lastPathComponent == name
         }) else {
-            throw Error(message: "Build did not return \(name)")
+            let returned: String = build.builtArtifacts.map { String(describing: $0.kind) + ": " + $0.url.path }.joined(separator: "; ")
+            throw Error(message: "Build did not return \(name). Artifacts: \(returned)")
         }
         return artifact.url
     }
@@ -155,4 +213,21 @@ struct Error: Swift.Error, CustomStringConvertible {
     @inlinable
     @_transparent
     var description: String { message }
+}
+extension Error: ExpressibleByStringLiteral {
+    @inlinable
+    @_transparent
+    init(stringLiteral value: StringLiteralType) {
+        self.init(message: value)
+    }
+    @inlinable
+    @_transparent
+    init(unicodeScalarLiteral value: String) {
+        self.init(message: value)
+    }
+    @inlinable
+    @_transparent
+    init(extendedGraphemeClusterLiteral value: String) {
+        self.init(message: value)
+    }
 }
