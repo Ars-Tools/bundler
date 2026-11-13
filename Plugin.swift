@@ -7,20 +7,34 @@ struct Plugin: CommandPlugin {
         var options: ArgumentExtractor = ArgumentExtractor(arguments)
         let configurations: Array<String> = options.extractOption(named: "configuration")
         let products: Array<String> = options.extractOption(named: "product")
+        let targets: Array<String> = options.extractOption(named: "target")
         let extensions: Array<String> = options.extractOption(named: "extension")
         let plists: Array<String> = options.extractOption(named: "info-plist")
         let resourcePaths: Array<String> = options.extractOption(named: "resources")
         let verifiers: Array<String> = options.extractOption(named: "verify")
-        guard configurations.count <= 1, products.count <= 1, extensions.count <= 1,
+        guard configurations.count <= 1, products.count <= 1, targets.count <= 1, extensions.count <= 1,
             plists.count <= 1, resourcePaths.count <= 1,
             let configuration: PackageManager.BuildConfiguration = PackageManager.BuildConfiguration(
                 rawValue: configurations.first ?? "release"),
             configuration != PackageManager.BuildConfiguration.inherit,
             options.remainingArguments.isEmpty
         else {
-            throw Error(message: "Usage: swift package build-bundle [--product name] [--extension bundle] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--verify executable-product]...")
+            throw Error(message: "Usage: swift package build-bundle [--product name] [--target name] [--extension bundle] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--verify executable-product]...")
         }
-        let product: String = products.first ?? context.package.displayName
+        let product: String
+        if let name: String = products.first {
+            product = name
+        } else if let target: String = targets.first {
+            let candidates: Array<LibraryProduct> = context.package.products.compactMap {
+                $0 as? LibraryProduct
+            }.filter { $0.kind == .static && $0.targets.contains { $0.name == target } }
+            guard let selected: LibraryProduct = candidates.first(where: { $0.name == target })
+                ?? (candidates.count == 1 ? candidates.first : nil)
+            else { throw Error(message: "Cannot select a unique static library product for target \(target); specify --product") }
+            product = selected.name
+        } else {
+            product = context.package.displayName
+        }
         let suffix: String = extensions.first ?? "bundle"
         let plist: URL = try infoPlist(in: context.package, product: product, path: plists.first)
         let metadata: Any = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), options: [], format: nil)

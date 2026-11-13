@@ -43,11 +43,18 @@ The plugin builds the selected static library, links its archive into a Mach-O l
 copies the property list and resources, then applies and verifies an ad-hoc code signature.
 It prints the absolute path to the completed bundle.
 
+In Xcode, choose Builder from the package's context menu and select one target.
+Xcode passes that selection as `--target`. Builder selects the static library
+product containing that target, preferring a product with the same name. If the
+selection is ambiguous, provide `--product` explicitly. For a HAL driver, enter
+`--extension driver` in Arguments; `--product` is unnecessary for a unique match.
+
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--product` | Consuming package name | Static library product to build. |
+| `--product` | Selected target's product, otherwise consuming package name | Static library product to build; overrides `--target` inference. |
+| `--target` | None | One target selected in Xcode, or supplied explicitly; selects its static library product. |
 | `--extension` | `bundle` | Output bundle extension. |
 | `--configuration` | `release` | Build configuration: `debug` or `release`. |
 | `--info-plist` | Automatic lookup | Override the property list path, relative to the package root. |
