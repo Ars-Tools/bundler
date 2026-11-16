@@ -12,8 +12,9 @@ let package: Package = Package(
     targets: [
         .plugin(
             name: "Builder",
-            capability: Target.PluginCapability.command(intent: PluginCommandIntent.custom(verb: "build-bundle", description: "Build and sign a macOS loadable bundle")),
-            path: "."
+            capability: Target.PluginCapability.command(intent: PluginCommandIntent.custom(verb: "build-bundle", description: "Build and sign macOS apps and loadable bundles")),
+            path: ".",
+            exclude: ["Checks"]
         ),
     ]
 )

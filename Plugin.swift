@@ -11,31 +11,51 @@ struct Plugin: CommandPlugin {
         let extensions: Array<String> = options.extractOption(named: "extension")
         let plists: Array<String> = options.extractOption(named: "info-plist")
         let resourcePaths: Array<String> = options.extractOption(named: "resources")
+        let embedded: Array<String> = options.extractOption(named: "embed-executable")
+        let contentPaths: Array<String> = options.extractOption(named: "contents")
         let verifiers: Array<String> = options.extractOption(named: "verify")
         guard configurations.count <= 1, products.count <= 1, targets.count <= 1, extensions.count <= 1,
-            plists.count <= 1, resourcePaths.count <= 1,
+            plists.count <= 1, resourcePaths.count <= 1, contentPaths.count <= 1,
+            Set(embedded).count == embedded.count,
             let configuration: PackageManager.BuildConfiguration = PackageManager.BuildConfiguration(
                 rawValue: configurations.first ?? "release"),
             configuration != PackageManager.BuildConfiguration.inherit,
             options.remainingArguments.isEmpty
         else {
-            throw Error(message: "Usage: swift package build-bundle [--product name] [--target name] [--extension bundle] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--verify executable-product]...")
+            throw Error(message: "Usage: swift package build-bundle [--product name] [--target name] [--extension bundle|app] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--embed-executable product]... [--contents directory] [--verify executable-product]...")
         }
         let product: String
         if let name: String = products.first {
             product = name
         } else if let target: String = targets.first {
-            let candidates: Array<LibraryProduct> = context.package.products.compactMap {
-                $0 as? LibraryProduct
-            }.filter { $0.kind == .static && $0.targets.contains { $0.name == target } }
-            guard let selected: LibraryProduct = candidates.first(where: { $0.name == target })
+            let candidates: Array<any Product> = context.package.products.filter {
+                ($0 is ExecutableProduct || ($0 as? LibraryProduct)?.kind == .static)
+                    && $0.targets.contains { $0.name == target }
+            }
+            guard let selected: any Product = candidates.first(where: { $0.name == target })
                 ?? (candidates.count == 1 ? candidates.first : nil)
-            else { throw Error(message: "Cannot select a unique static library product for target \(target); specify --product") }
+            else { throw Error(message: "Cannot select a unique static library or executable product for target \(target); specify --product") }
             product = selected.name
         } else {
             product = context.package.displayName
         }
-        let suffix: String = extensions.first ?? "bundle"
+        guard let selected: any Product = context.package.products.first(where: { $0.name == product }),
+              selected is ExecutableProduct || (selected as? LibraryProduct)?.kind == .static else {
+            throw Error(message: "Select a static library or executable product: \(product)")
+        }
+        let application: Bool = selected is ExecutableProduct
+        let suffix: String = extensions.first ?? (application ? "app" : "bundle")
+        guard application ? suffix == "app" : !["app", "xpc"].contains(suffix) else {
+            throw Error(message: "Executable products require the app extension; app and xpc cannot contain an MH_BUNDLE")
+        }
+        guard application || (embedded.isEmpty && contentPaths.isEmpty) else {
+            throw Error(message: "--embed-executable and --contents require an executable app product")
+        }
+        for helper: String in embedded {
+            guard context.package.products.contains(where: { $0.name == helper && $0 is ExecutableProduct }) else {
+                throw Error(message: "Embedded product must be an executable: \(helper)")
+            }
+        }
         let plist: URL = try infoPlist(in: context.package, product: product, path: plists.first)
         let metadata: Any = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), options: [], format: nil)
         guard let properties: Dictionary<String, Any> = metadata as? Dictionary<String, Any>,
@@ -47,12 +67,18 @@ struct Plugin: CommandPlugin {
             throw Error(message: "Info.plist must contain CFBundleExecutable and CFBundleIdentifier; executable and extension must be path components")
         }
 
+        guard !embedded.contains(name), !embedded.contains(product) else {
+            throw Error(message: "An embedded executable must differ from the app product and CFBundleExecutable")
+        }
+        if application, properties["CFBundlePackageType"] as? String != "APPL" {
+            throw Error(message: "An app Info.plist must declare CFBundlePackageType = APPL")
+        }
+
         let parameters: PackageManager.BuildParameters = PackageManager.BuildParameters(
             configuration: configuration, echoLogs: true)
         let subset: PackageManager.BuildSubset = PackageManager.BuildSubset.product(product)
         let build: PackageManager.BuildResult = try packageManager.build(subset, parameters: parameters)
         guard build.succeeded else { throw Error(message: build.logText) }
-        let inputs: Array<String> = try linkInputs(product, in: context.package, build: build)
 
         let files: FileManager = FileManager.default
         // Xcode may use its active configuration rather than the requested one.
@@ -68,22 +94,27 @@ struct Plugin: CommandPlugin {
         try files.createDirectory(at: macOS, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: staging) }
 
-        // Link the package code as MH_BUNDLE, preserving the exported C factory.
-        let swiftc: URL = try context.tool(named: "swiftc").url
-        let xcrun: URL = try context.tool(named: "xcrun").url
-        let sdkOutput: Pipe = Pipe()
-        let sdkQuery: Process = Process()
-        sdkQuery.executableURL = xcrun
-        sdkQuery.arguments = ["--sdk", "macosx", "--show-sdk-path"]
-        sdkQuery.standardOutput = sdkOutput
-        try sdkQuery.run()
-        let sdk: String = String(decoding: sdkOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        sdkQuery.waitUntilExit()
-        guard sdkQuery.terminationStatus == 0, !sdk.isEmpty else { throw Error(message: "Cannot locate macOS SDK") }
-        try run(swiftc, arguments: [
-            "-sdk", sdk, "-emit-executable", "-Xlinker", "-bundle", "-Xlinker", "-all_load",
-        ] + inputs + ["-o", executable.path])
+        if application {
+            try files.copyItem(at: artifact(product, in: build), to: executable)
+        } else {
+            let inputs: Array<String> = try linkInputs(product, in: context.package, build: build)
+            // Link the package code as MH_BUNDLE, preserving the exported C factory.
+            let swiftc: URL = try context.tool(named: "swiftc").url
+            let xcrun: URL = try context.tool(named: "xcrun").url
+            let sdkOutput: Pipe = Pipe()
+            let sdkQuery: Process = Process()
+            sdkQuery.executableURL = xcrun
+            sdkQuery.arguments = ["--sdk", "macosx", "--show-sdk-path"]
+            sdkQuery.standardOutput = sdkOutput
+            try sdkQuery.run()
+            let sdk: String = String(decoding: sdkOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            sdkQuery.waitUntilExit()
+            guard sdkQuery.terminationStatus == 0, !sdk.isEmpty else { throw Error(message: "Cannot locate macOS SDK") }
+            try run(swiftc, arguments: [
+                "-sdk", sdk, "-emit-executable", "-Xlinker", "-bundle", "-Xlinker", "-all_load",
+            ] + inputs + ["-o", executable.path])
+        }
         try files.copyItem(at: plist, to: staging.appendingPathComponent("Contents/Info.plist"))
         let resources: URL = context.package.directoryURL.appendingPathComponent(resourcePaths.first ?? "Resources")
         if files.fileExists(atPath: resources.path) {
@@ -92,11 +123,36 @@ struct Plugin: CommandPlugin {
             throw Error(message: "Resources directory does not exist: \(resources.path)")
         }
 
+        // Extra Contents entries must not overwrite the executable, metadata, or resources.
+        if let path: String = contentPaths.first {
+            let contents: URL = context.package.directoryURL.appendingPathComponent(path)
+            let entries: Array<URL> = try files.contentsOfDirectory(at: contents,
+                includingPropertiesForKeys: nil)
+            for entry: URL in entries {
+                guard !["MacOS", "Info.plist", "_CodeSignature"].contains(entry.lastPathComponent) else {
+                    throw Error(message: "Reserved Contents entry: \(entry.lastPathComponent)")
+                }
+                try files.copyItem(at: entry,
+                    to: staging.appendingPathComponent("Contents").appendingPathComponent(entry.lastPathComponent))
+            }
+        }
+
         let codesign: URL = try context.tool(named: "codesign").url
+        // Helpers are signed before the enclosing app seals their signatures.
+        for helper: String in embedded {
+            let result: PackageManager.BuildResult = try packageManager.build(.product(helper), parameters: parameters)
+            guard result.succeeded else { throw Error(message: result.logText) }
+            let destination: URL = macOS.appendingPathComponent(helper)
+            try files.copyItem(at: artifact(helper, in: result), to: destination)
+            try run(codesign, arguments: [
+                "--force", "--sign", "-", "--timestamp=none", "--identifier", identifier + "." + helper, destination.path,
+            ])
+            try run(codesign, arguments: ["--verify", "--strict", destination.path])
+        }
         try run(codesign, arguments: [
             "--force", "--sign", "-", "--timestamp=none", "--identifier", identifier, staging.path,
         ])
-        try run(codesign, arguments: ["--verify", "--strict", staging.path])
+        try run(codesign, arguments: ["--verify", "--strict", "--deep", staging.path])
         if files.fileExists(atPath: bundle.path) { try files.removeItem(at: bundle) }
         try files.moveItem(at: staging, to: bundle)
         print("Bundle: \(bundle.path)")
@@ -178,7 +234,7 @@ struct Plugin: CommandPlugin {
     @_transparent
     func artifact(_ name: String, in build: PackageManager.BuildResult) throws -> URL {
         guard let artifact: PackageManager.BuildResult.BuiltArtifact = build.builtArtifacts.first(where: {
-            $0.url.lastPathComponent == name
+            $0.kind == .executable && $0.url.lastPathComponent == name
         }) else {
             let returned: String = build.builtArtifacts.map { String(describing: $0.kind) + ": " + $0.url.path }.joined(separator: "; ")
             throw Error(message: "Build did not return \(name). Artifacts: \(returned)")
