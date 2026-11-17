@@ -1,12 +1,161 @@
 # Bundler
 
-A SwiftPM command plugin that builds signed macOS apps from executable products and loadable bundles from static library products.
+A SwiftPM command plugin that builds macOS apps and loadable bundles, and iOS apps with embedded WidgetKit extensions.
 It has no dependency on Core Audio or HSP and supports bundles such as `.bundle`, `.plugin`, and Core Audio HAL `.driver` plug-ins, as well as `.app` applications with embedded helper executables.
 
 ## Requirements
 
 - A macOS Swift toolchain supporting Swift 6.4 or later, with a macOS SDK.
 - The macOS `codesign` tool.
+- For iOS: full Xcode with the iOS SDK; Simulator runtime for installation/testing. Device builds also require signing credentials and provisioning profiles.
+
+## iOS apps and WidgetKit extensions
+
+Use a normal SwiftPM manifest with one executable product for the settings app
+and one executable product for each widget extension. An extension can expose
+multiple widget types using `WidgetBundle`. Bundler generates a temporary native
+Xcode project and invokes `xcodebuild`; you do not maintain an `.xcodeproj`.
+Full Xcode on macOS is required. This does not add extension building to the
+Swift Playgrounds app or to the standard `AppleProductTypes.iOSApplication` build.
+
+```text
+Package.swift
+Bundle/
+  Info.plist
+  Entitlements.plist           # optional
+  Sources/App.swift           # @main struct conforming to App
+  Resources/                  # optional; compiled/copied into the app
+FC/
+  Info.plist
+  Entitlements.plist           # optional
+  Sources/Widgets.swift       # @main Widget or WidgetBundle, AppIntents, provider
+  Resources/                  # optional; compiled/copied into the extension
+Shared/Sources/Settings.swift
+```
+
+```swift
+// swift-tools-version: 6.4
+import PackageDescription
+
+let package = Package(
+    name: "Widgets",
+    platforms: [.iOS(.v17)],
+    products: [
+        .executable(name: "Widgets", targets: ["SettingsApp"]),
+        .executable(name: "FC", targets: ["FC"]),
+        .library(name: "Shared", targets: ["Shared"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/ars-tools/bundler", branch: "release"),
+    ],
+    targets: [
+        .executableTarget(name: "SettingsApp", dependencies: ["Shared"],
+            path: "Bundle", exclude: ["Info.plist", "Entitlements.plist", "Resources"]),
+        .executableTarget(name: "FC", dependencies: ["Shared"],
+            path: "FC", exclude: ["Info.plist", "Entitlements.plist", "Resources"]),
+        .target(name: "Shared", path: "Shared/Sources"),
+    ]
+)
+```
+
+Only exclude optional paths that actually exist. Use a local `.package(path:)`
+dependency while testing unreleased Bundler changes.
+
+The app `Info.plist` requires literal `CFBundleExecutable` and
+`CFBundleIdentifier` values, for example `Widgets` and `tools.ars.widgets`.
+The extension plist requires different values, for example `FCWidget` and
+`tools.ars.widgets.fc`, plus:
+
+```xml
+<key>NSExtension</key>
+<dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.widgetkit-extension</string>
+</dict>
+```
+
+Do not set `NSExtensionPrincipalClass` or `NSExtensionMainStoryboard` for a
+WidgetKit extension. Extension bundle identifiers must start with the app's ID
+followed by a dot. Executable names must be unique path components consisting
+of letters, digits, underscores or hyphens. Bundle package type defaults to
+`APPL` for the app and `XPC!` for extensions; build/display versions default to
+`1` / `1.0`. Custom values in each plist are preserved.
+
+For shared settings, put matching App Group entitlements in each target's
+`Entitlements.plist` and use the same group with `UserDefaults(suiteName:)` or
+the shared container API. Device provisioning profiles must authorize the group.
+Bundler forwards these entitlements to Xcode; it does not register App Groups
+or create signing assets on the developer portal.
+
+Build a Simulator app, adding `--embed-widget` once per extension product:
+
+```sh
+swift package --disable-sandbox build-bundle --platform ios-simulator \
+  --product Widgets --embed-widget FC --configuration debug \
+  --deployment-target 17.0
+```
+
+The command plugin launches Xcode and its build services, which need access to
+SDK caches and build services outside the SwiftPM plugin sandbox. Use
+`--disable-sandbox` with trusted packages when invoking this iOS path from the CLI.
+App and extension sources compile as native Swift targets so Xcode extracts
+App Intents metadata directly from those sources. Each target needs its own
+`@main` entry point. The app can consist entirely of settings UI.
+
+The final `Bundle:` line is the authoritative `.app` output. With a booted
+Simulator, install it with `xcrun simctl install booted /absolute/path/Widgets.app`,
+then add its widget from the Home Screen widget gallery. Simulator builds use
+ad-hoc signing and need no developer team.
+
+For a device build:
+
+```sh
+swift package --disable-sandbox build-bundle --platform ios \
+  --product Widgets --embed-widget FC --development-team YOURTEAMID
+```
+
+Device builds use Xcode Automatic signing with locally available signing assets.
+The command does not pass `-allowProvisioningUpdates`, install an app, upload,
+archive or export an IPA. Signing/installation on a physical device must be
+validated with your developer account. App Store distribution is not provided.
+
+### iOS source and resource boundaries
+
+- The selected products must have Swift executable entry targets. Bundler takes
+  their source file lists, compilation conditions and linked libraries/frameworks
+  from SwiftPM. Source paths such as `Bundle/Sources` and `FC/Sources` are supported.
+- Local target dependencies must be exported as single-target automatic/static
+  library products. Product dependencies must be automatic/static libraries.
+  Xcode builds these as Swift packages, including their transitive dependencies
+  and SwiftPM resource bundles. Embedding dynamic dependency frameworks is not
+  supported by this initial iOS path.
+- Entry-target resources use a `Resources` directory directly inside the target
+  directory (`path:` in the manifest). Its immediate entries are native Xcode
+  resources: asset catalogs compile with `actool`, plain files copy to the bundle
+  root, and other directories copy as folders. `Bundle.module` in entry-target
+  sources resolves to that native bundle. Library dependencies retain normal
+  SwiftPM resource behavior. Localized `.lproj` resource groups are not supported
+  in entry targets yet; place localized resources in a package library instead.
+- Keep package build plugins, macros and custom compiler settings in library
+  dependencies. Entry-target generated files are rejected; arbitrary SwiftPM
+  unsafe flags/settings and platform-conditioned manifest behavior are not a
+  complete replacement for native Xcode build settings. This path uses Swift 6.
+- Per-target `Info.plist` lookup uses the same rules as macOS. Put each plist
+  inside its entry target directory to avoid sharing the root fallback accidentally.
+  The macOS `--info-plist`, `--resources`, `--contents`, `--embed-executable`,
+  `--extension` and `--verify` options are rejected for iOS.
+- Output is under the command plugin work directory in
+  `ios-simulator/<configuration>/<name>.app` or `ios/<configuration>/<name>.app`.
+  A build uses fresh products so removed extensions cannot survive from an older
+  build. A failed build leaves the previous published app intact and retains its
+  generated project for diagnosis. Run one build per platform/configuration at a time.
+
+Run the iOS integration check with `python3 Checks/check_ios.py`. It builds two
+real extensions (including a button-backed `AppIntent`) and verifies Mach-O
+platform/type, bundle layout, asset compilation, package resources, metadata,
+input validation and removal of stale extensions. Set `BUNDLER_CHECK_KEEP=1` to
+retain its fixture for manual Simulator testing. The check does not require or
+claim physical-device provisioning validation.
 
 ## Usage
 
@@ -129,11 +278,12 @@ swift package build-bundle --product MyPlugin --extension driver \
 
 ## Layout and output
 
-The package contains the `Builder` command plugin, whose implementation is `Plugin.swift` at the package root:
+The package contains the `Builder` command plugin, implemented at the package root:
 
 ```text
 Package.swift
 Plugin.swift
+IOSBuilder.swift
 README.md
 ```
 

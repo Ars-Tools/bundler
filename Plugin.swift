@@ -5,6 +5,18 @@ import PackagePlugin
 struct Plugin: CommandPlugin {
     func performCommand(context: PluginContext, arguments: Array<String>) throws {
         var options: ArgumentExtractor = ArgumentExtractor(arguments)
+        let platforms = options.extractOption(named: "platform")
+        let widgets = options.extractOption(named: "embed-widget")
+        let deployments = options.extractOption(named: "deployment-target")
+        let teams = options.extractOption(named: "development-team")
+        guard platforms.count <= 1, deployments.count <= 1, teams.count <= 1,
+              Set(widgets).count == widgets.count else {
+            throw Error(message: "Specify --platform, --deployment-target and --development-team at most once; --embed-widget products must be unique")
+        }
+        let platform = platforms.first ?? "macos"
+        guard ["macos", "ios", "ios-simulator"].contains(platform) else {
+            throw Error(message: "--platform must be macos, ios or ios-simulator")
+        }
         let configurations: Array<String> = options.extractOption(named: "configuration")
         let products: Array<String> = options.extractOption(named: "product")
         let targets: Array<String> = options.extractOption(named: "target")
@@ -22,7 +34,7 @@ struct Plugin: CommandPlugin {
             configuration != PackageManager.BuildConfiguration.inherit,
             options.remainingArguments.isEmpty
         else {
-            throw Error(message: "Usage: swift package build-bundle [--product name] [--target name] [--extension bundle|app] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--embed-executable product]... [--contents directory] [--verify executable-product]...")
+            throw Error(message: "Usage: swift package build-bundle [--platform macos|ios|ios-simulator] [--embed-widget product]... [--deployment-target version] [--development-team ID] [--product name] [--target name] [--extension bundle|app] [--configuration release|debug] [--info-plist Info.plist] [--resources Resources] [--embed-executable product]... [--contents directory] [--verify executable-product]...")
         }
         let product: String
         if let name: String = products.first {
@@ -42,6 +54,19 @@ struct Plugin: CommandPlugin {
         guard let selected: any Product = context.package.products.first(where: { $0.name == product }),
               selected is ExecutableProduct || (selected as? LibraryProduct)?.kind == .static else {
             throw Error(message: "Select a static library or executable product: \(product)")
+        }
+        if platform != "macos" {
+            guard extensions.isEmpty, embedded.isEmpty, contentPaths.isEmpty, verifiers.isEmpty,
+                  plists.isEmpty, resourcePaths.isEmpty else {
+                throw Error(message: "iOS uses per-target Info.plist, Resources and Entitlements.plist; macOS bundle/helper/verification options are not supported")
+            }
+            try buildIOS(context: context, product: selected, widgets: widgets,
+                         simulator: platform == "ios-simulator", configuration: configuration.rawValue,
+                         deployment: deployments.first ?? "17.0", team: teams.first)
+            return
+        }
+        guard widgets.isEmpty, deployments.isEmpty, teams.isEmpty else {
+            throw Error(message: "--embed-widget, --deployment-target and --development-team require --platform ios or ios-simulator")
         }
         let application: Bool = selected is ExecutableProduct
         let suffix: String = extensions.first ?? (application ? "app" : "bundle")
